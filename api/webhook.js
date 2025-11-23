@@ -3,68 +3,75 @@ const Jimp = require('jimp');
 const QrCode = require('qrcode-reader');
 const axios = require('axios');
 
-// En Vercel NO usamos dotenv, tomamos la variable directa del sistema
-const token = process.env.TELEGRAM_TOKEN;
-const bot = new TelegramBot(token); // Sin polling: true
-
 module.exports = async (req, res) => {
-    // 1. Respuesta inmediata a Telegram para evitar bucles
-    // Si no respondemos rápido, Telegram reenvía el mensaje infinitamente
-    res.status(200).send('OK');
+    // 1. Configuramos el bot dentro de la función para asegurar que tome el token fresco
+    const token = process.env.TELEGRAM_TOKEN;
+    
+    // Si no hay token, fallamos controladamente
+    if (!token) {
+        console.error("❌ Token no encontrado");
+        return res.status(500).send('Token missing');
+    }
+
+    const bot = new TelegramBot(token, { polling: false });
 
     try {
-        // Solo procesamos si es un POST y tiene cuerpo
-        if (req.method === 'POST' && req.body) {
-            
+        // Solo procesamos POST
+        if (req.method === 'POST') {
             const update = req.body;
 
-            // --- COMANDOS BÁSICOS ---
-            if (update.message && update.message.text === '/start') {
-                await bot.sendMessage(update.message.chat.id, "¡Hola! Estoy listo en Vercel. Envíame un QR.");
-                return;
-            }
-
-            // --- PROCESAR FOTO ---
-            if (update.message && update.message.photo) {
+            // Verificamos si es un mensaje
+            if (update.message) {
                 const chatId = update.message.chat.id;
-                console.log(`📥 Recibiendo imagen de chat ${chatId}...`);
 
-                // Avisamos al usuario que estamos trabajando
-                await bot.sendChatAction(chatId, 'upload_photo');
+                // CASO 1: Comando /start
+                if (update.message.text === '/start') {
+                    await bot.sendMessage(chatId, "👋 ¡Hola! Ahora sí estoy configurado correctamente. Envíame un QR.");
+                }
 
-                // 1. Obtener link
-                const photoId = update.message.photo[update.message.photo.length - 1].file_id;
-                const fileLink = await bot.getFileLink(photoId);
+                // CASO 2: Es una FOTO
+                else if (update.message.photo) {
+                    console.log(`📸 Procesando foto de ${chatId}...`);
+                    
+                    // Avisamos "escribiendo..." para ganar tiempo y paciencia del usuario
+                    await bot.sendChatAction(chatId, 'upload_photo');
 
-                // 2. Descargar
-                const response = await axios({
-                    method: 'get',
-                    url: fileLink,
-                    responseType: 'arraybuffer'
-                });
+                    // --- LÓGICA QR ---
+                    const photoId = update.message.photo[update.message.photo.length - 1].file_id;
+                    const fileLink = await bot.getFileLink(photoId);
 
-                // 3. Leer con JIMP
-                const image = await Jimp.read(response.data);
+                    const response = await axios({
+                        method: 'get',
+                        url: fileLink,
+                        responseType: 'arraybuffer'
+                    });
 
-                // 4. Escanear QR
-                const qr = new QrCode();
+                    const image = await Jimp.read(response.data);
+                    
+                    const qr = new QrCode();
+                    const result = await new Promise((resolve) => {
+                        qr.callback = (err, value) => resolve(value);
+                        qr.decode(image.bitmap);
+                    });
+
+                    if (result) {
+                        await bot.sendMessage(chatId, `✅ **QR DETECTADO:**\n\`${result.result}\``, { parse_mode: 'Markdown' });
+                    } else {
+                        await bot.sendMessage(chatId, "⚠️ No pude detectar un código QR en esa imagen.");
+                    }
+                }
                 
-                // Promesa manual para esperar al callback
-                const value = await new Promise((resolve, reject) => {
-                    qr.callback = (err, v) => err ? reject(err) : resolve(v);
-                    qr.decode(image.bitmap);
-                });
-
-                if (value) {
-                    console.log("✅ QR Encontrado:", value.result);
-                    await bot.sendMessage(chatId, `✅ **QR Leído:**\n\`${value.result}\``, { parse_mode: 'Markdown' });
-                } else {
-                    await bot.sendMessage(chatId, "❌ No pude leer el QR. Intenta recortar la imagen.");
+                // CASO 3: Texto normal
+                else if (update.message.text) {
+                    await bot.sendMessage(chatId, "Envía una imagen con un código QR, por favor.");
                 }
             }
         }
     } catch (error) {
-        console.error("Error en webhook:", error.message);
-        // No enviamos error al usuario siempre para no saturar, solo logueamos
+        console.error("🔥 Error en el proceso:", error);
     }
+
+    // 2. ¡IMPORTANTE! Enviamos el OK solo DESPUÉS de haber hecho todo el trabajo (await)
+    // Esto mantiene el servidor vivo hasta que el mensaje se envía.
+    res.status(200).send('OK');
 };
