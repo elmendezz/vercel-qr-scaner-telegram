@@ -6,6 +6,7 @@
     "axios": "^1.13.2",
     "jimp": "^0.16.1",
     "node-telegram-bot-api": "^0.66.0",
-    "qrcode-reader": "^1.0.4"
+    "qrcode-reader": "^1.0.4",
+    "qrcode": "^1.5.3" 
   }
 }
