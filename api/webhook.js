@@ -3,90 +3,68 @@ const Jimp = require('jimp');
 const QrCode = require('qrcode-reader');
 const axios = require('axios');
 
-// Inicializamos el bot SIN polling
+// En Vercel NO usamos dotenv, tomamos la variable directa del sistema
 const token = process.env.TELEGRAM_TOKEN;
-const bot = new TelegramBot(token);
+const bot = new TelegramBot(token); // Sin polling: true
 
-// --- LÓGICA DEL BOT ---
-// Definimos los listeners fuera de la función principal para no duplicarlos
-
-bot.onText(/\/start/, (msg) => {
-    bot.sendMessage(msg.chat.id, "¡Hola! Estoy vivo en Vercel. Envíame un QR.");
-});
-
-bot.on('photo', async (msg) => {
-    const chatId = msg.chat.id;
-    
-    try {
-        // Le decimos a Telegram que estamos "escribiendo" o "subiendo foto"
-        // Nota: await aquí es opcional para no bloquear, pero útil.
-        await bot.sendChatAction(chatId, 'upload_photo');
-
-        // 1. Obtener link de descarga
-        const photoId = msg.photo[msg.photo.length - 1].file_id;
-        const fileLink = await bot.getFileLink(photoId);
-
-        // 2. Descargar buffer
-        const response = await axios({
-            method: 'get',
-            url: fileLink,
-            responseType: 'arraybuffer'
-        });
-
-        // 3. Procesar imagen con JIMP
-        const image = await Jimp.read(response.data);
-
-        // 4. Lector QR
-        const qr = new QrCode();
-
-        // Promisificamos el callback de qr.decode para que Vercel espere el resultado
-        const scanQR = () => new Promise((resolve, reject) => {
-            qr.callback = function(err, value) {
-                if (err) reject(err);
-                else resolve(value);
-            };
-            qr.decode(image.bitmap);
-        });
-
-        try {
-            const value = await scanQR();
-            if (value) {
-                const respuesta = `✅ **¡Leído en la Nube!**\n\n` +
-                                  `📝 **Contenido:** \`${value.result}\`\n` + 
-                                  `🛡️ **Puntos:** ${value.points.length}`;
-                await bot.sendMessage(chatId, respuesta, { parse_mode: 'Markdown' });
-            } else {
-                await bot.sendMessage(chatId, "❌ No encontré nada. Intenta recortar la imagen.");
-            }
-        } catch (qrErr) {
-            console.log("Error QR interno:", qrErr);
-            await bot.sendMessage(chatId, "❌ No pude decodificar este QR.");
-        }
-
-    } catch (error) {
-        console.error("🔥 Error crítico:", error.message);
-        await bot.sendMessage(chatId, `⚠️ Error: ${error.message}`);
-    }
-});
-
-// --- MANEJADOR DE VERCEL (WEBHOOK) ---
 module.exports = async (req, res) => {
+    // 1. Respuesta inmediata a Telegram para evitar bucles
+    // Si no respondemos rápido, Telegram reenvía el mensaje infinitamente
+    res.status(200).send('OK');
+
     try {
-        // Solo aceptamos POST (que es lo que envía Telegram)
-        if (req.method === 'POST') {
-            const { body } = req;
+        // Solo procesamos si es un POST y tiene cuerpo
+        if (req.method === 'POST' && req.body) {
             
-            // Procesamos la actualización
-            if (body) {
-                // processUpdate maneja los eventos definidos arriba (onText, on 'photo')
-                bot.processUpdate(body);
+            const update = req.body;
+
+            // --- COMANDOS BÁSICOS ---
+            if (update.message && update.message.text === '/start') {
+                await bot.sendMessage(update.message.chat.id, "¡Hola! Estoy listo en Vercel. Envíame un QR.");
+                return;
+            }
+
+            // --- PROCESAR FOTO ---
+            if (update.message && update.message.photo) {
+                const chatId = update.message.chat.id;
+                console.log(`📥 Recibiendo imagen de chat ${chatId}...`);
+
+                // Avisamos al usuario que estamos trabajando
+                await bot.sendChatAction(chatId, 'upload_photo');
+
+                // 1. Obtener link
+                const photoId = update.message.photo[update.message.photo.length - 1].file_id;
+                const fileLink = await bot.getFileLink(photoId);
+
+                // 2. Descargar
+                const response = await axios({
+                    method: 'get',
+                    url: fileLink,
+                    responseType: 'arraybuffer'
+                });
+
+                // 3. Leer con JIMP
+                const image = await Jimp.read(response.data);
+
+                // 4. Escanear QR
+                const qr = new QrCode();
+                
+                // Promesa manual para esperar al callback
+                const value = await new Promise((resolve, reject) => {
+                    qr.callback = (err, v) => err ? reject(err) : resolve(v);
+                    qr.decode(image.bitmap);
+                });
+
+                if (value) {
+                    console.log("✅ QR Encontrado:", value.result);
+                    await bot.sendMessage(chatId, `✅ **QR Leído:**\n\`${value.result}\``, { parse_mode: 'Markdown' });
+                } else {
+                    await bot.sendMessage(chatId, "❌ No pude leer el QR. Intenta recortar la imagen.");
+                }
             }
         }
-        
-        // Siempre respondemos 200 OK rápido a Telegram para que no reintente
-        res.status(200).send('OK');
     } catch (error) {
-        console.error('Error en webhook:', error);
-        res.status(500).send('Error');
+        console.error("Error en webhook:", error.message);
+        // No enviamos error al usuario siempre para no saturar, solo logueamos
     }
 };
